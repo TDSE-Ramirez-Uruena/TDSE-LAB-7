@@ -8,53 +8,102 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 public class HttpServer {
 
-    private static final int DEFAULT_PORT = 8080;
+    private static final int THREAD_POOL_SIZE = 10;
     private static boolean running = false;
+    private static ExecutorService threadPool;
+    private static ServerSocket serverSocket;
 
     public static void start(int port) {
         running = true;
+        threadPool = Executors.newFixedThreadPool(THREAD_POOL_SIZE);
 
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.out.println("Servidor HTTP iniciado y listo en el puerto: " + port);
+        try {
+            serverSocket = new ServerSocket(port);
+            System.out.println("Servidor HTTP Concurrente iniciado en el puerto: " + port);
 
             while (running) {
-                try (Socket clientSocket = serverSocket.accept();
-                     InputStream inStream = clientSocket.getInputStream();
-                     OutputStream outStream = new BufferedOutputStream(clientSocket.getOutputStream());
-                     BufferedReader in = new BufferedReader(new InputStreamReader(inStream, StandardCharsets.UTF_8))) {
-
-                    String requestLine = in.readLine();
-                    if (requestLine == null || requestLine.isEmpty()) {
-                        continue;
-                    }
-
-                    // Consumir encabezados HTTP
-                    String headerLine;
-                    while ((headerLine = in.readLine()) != null && !headerLine.isEmpty()) {
-                        // Consumo de headers
-                    }
-
-                    handleRequest(requestLine, outStream);
-
-                } catch (IOException e) {
-                    if (running) {
-                        System.err.println("Error procesando conexión cliente: " + e.getMessage());
+                try {
+                    Socket clientSocket = serverSocket.accept();
+                    threadPool.submit(() -> handleClient(clientSocket));
+                } catch (SocketException e) {
+                    if (!running) {
+                        System.out.println("ServerSocket cerrado debido a Graceful Shutdown.");
+                    } else {
+                        System.err.println("Error en la conexión del cliente: " + e.getMessage());
                     }
                 }
             }
         } catch (IOException e) {
             System.err.println("No se pudo iniciar el servidor en el puerto " + port + ": " + e.getMessage());
+        } finally {
+            stopThreadPool();
         }
 
-        System.out.println("Servidor detenido de manera secuencial (Graceful Shutdown).");
+        System.out.println("Servidor detenido de manera concurrente (Graceful Shutdown completado).");
     }
 
     public static void stop() {
         running = false;
+        try {
+            if (serverSocket != null && !serverSocket.isClosed()) {
+                serverSocket.close();
+            }
+        } catch (IOException e) {
+            System.err.println("Error cerrando ServerSocket: " + e.getMessage());
+        }
+    }
+
+    private static void stopThreadPool() {
+        if (threadPool != null) {
+            threadPool.shutdown();
+            try {
+                if (!threadPool.awaitTermination(5, TimeUnit.SECONDS)) {
+                    threadPool.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                threadPool.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    private static void handleClient(Socket clientSocket) {
+        try (InputStream inStream = clientSocket.getInputStream();
+             OutputStream outStream = new BufferedOutputStream(clientSocket.getOutputStream());
+             BufferedReader in = new BufferedReader(new InputStreamReader(inStream, StandardCharsets.UTF_8))) {
+
+            String requestLine = in.readLine();
+            if (requestLine == null || requestLine.isEmpty()) {
+                return;
+            }
+
+
+            String headerLine;
+            while ((headerLine = in.readLine()) != null && !headerLine.isEmpty()) {
+
+            }
+
+            handleRequest(requestLine, outStream);
+
+        } catch (IOException e) {
+            System.err.println("Error procesando petición en hilo de trabajo: " + e.getMessage());
+        } finally {
+            try {
+                if (!clientSocket.isClosed()) {
+                    clientSocket.close();
+                }
+            } catch (IOException e) {
+                System.err.println("Error cerrando socket del cliente: " + e.getMessage());
+            }
+        }
     }
 
     private static void handleRequest(String requestLine, OutputStream out) throws IOException {
@@ -68,14 +117,13 @@ public class HttpServer {
 
         String path = req.getPath();
 
-        // 1. Verificar si existe una ruta lambda registrada en Router
+
         if (Router.hasRoute(path)) {
             try {
                 Route route = Router.getRoute(path);
                 Object result = route.handle(req, resp);
                 String body = result != null ? result.toString() : "";
 
-                // Si el body parece un objeto/JSON o texto plano
                 String contentType = resp.getContentType();
                 if (body.startsWith("{") || body.startsWith("[")) {
                     contentType = "application/json; charset=UTF-8";
@@ -88,7 +136,7 @@ public class HttpServer {
             return;
         }
 
-        // 2. Fallback: Intentar servir recurso estático
+
         byte[] fileData = StaticFileService.getFileAsBytes(path);
 
         if (fileData != null) {
@@ -97,11 +145,9 @@ public class HttpServer {
             return;
         }
 
-        // 3. Ninguno coincide: 404 Not Found
+
         sendErrorResponse(out, "404 Not Found", "Recurso no encontrado: " + path);
     }
-
-    // --- MÉTODOS DE RESPUESTA HTTP ---
 
     private static void sendStringResponse(OutputStream out, String status, String contentType, String body) throws IOException {
         byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
