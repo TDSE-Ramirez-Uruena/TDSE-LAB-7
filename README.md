@@ -1,191 +1,117 @@
-# Building and Deploying a Maintainable Application Server (Web Framework)
+# LAB 7 - Web Framework Extension: Concurrent Execution & Dockerization
 
-**Student:** Julián Ramírez
-**Course:** Enterprise Architecture - Escuela Colombiana de Ingeniería Julio Garavito
-**Cloud Deployment (AWS EC2):** `http://44.211.220.229:35000/`
-
----
-
-## 1. Project Description
-
-In this lab, the previous sequential HTTP server was evolved into a **lightweight, independent web micro-framework**. The architecture completely decouples the underlying TCP socket processing from the application's business logic, allowing developers to register dynamic `GET` endpoints using Java lambda functions.
-
-### Key Features
-
-* **Fluent & Intuitive API:** Route registration via `get("/route", (req, resp) -> ...)` and static resource configuration using `staticfiles("/public")`.
-* **Static File Service:** Unified serving of text resources (HTML, JS, CSS) and binary files (PNG/JPEG images) read directly as byte streams.
-* **Query Parameter Extraction:** `Request` abstraction supporting multiple query-string parameters (`req.getValue("param")`) without crashing on missing values.
-* **Externalized Configuration:** Environment variable reading for `PORT`, `GREETING_PREFIX`, and `APP_ENV`.
-* **Graceful Sequential Shutdown:** Sequential server shutdown via the `/shutdown` endpoint, automatically restricted to run only in development environments (`APP_ENV=development`).
+**Student:** Julián Ramírez  
+**Course:** Enterprise Architecture - Escuela Colombiana de Ingeniería Julio Garavito  
+**Docker Hub Repository:** `https://hub.docker.com/r/<TU_USUARIO_DOCKERHUB>/networking-lab2`  
+**Cloud Deployment (AWS EC2):** `http://54.242.64.181:35000/`
 
 ---
 
-## 2. System Metaphor: "The Office Building"
+## 1. Project Overview & Current State
 
-To explain the separation of concerns and the request lifecycle, the system is described using an office building metaphor:
+This project represents the evolved, production-ready version of our custom web micro-framework. Transitioning from the previous single-threaded sequential architecture, this extension introduces **multithreaded concurrent request processing**, **thread-safe graceful shutdown handling**, full **containerization via Docker**, and deployment onto **Amazon Web Services (AWS EC2)**.
 
-| Metaphor Component            | Framework Component          | System Responsibility                                                                                                                  |
-| ----------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| **Front Desk / Receptionist** | `HttpServer`                 | Receives visitors (TCP requests), parses HTTP headers, and delivers the final response.                                                |
-| **Lobby Directory**           | `Router`                     | Looks up registered routes to direct the visitor to the correct office.                                                                |
-| **Specialized Offices**       | Lambda Handlers (`Route`)    | Execute specific business logic to handle the requested query.                                                                         |
-| **Document Archive**          | `StaticFileService`          | Serves physical files (HTML, JS, images) when no dynamic office matches the request.                                                   |
-| **Building Regulations**      | Environment Variables        | Define global operational rules such as entry port or execution environment (`APP_ENV`).                                               |
-| **Closing Procedure**         | Graceful Shutdown (`stop()`) | Finishes serving the current visitor at the desk, closes the main door, and powers down without interrupting active requests abruptly. |
+### Key Enhancements:
+* **Concurrent Request Handling:** Replaced the sequential single-thread loop with an `ExecutorService` fixed thread pool (`THREAD_POOL_SIZE = 10`), allowing non-blocking parallel client request processing.
+* **Thread-Safe Graceful Shutdown:** Enhanced lifecycle management to safely unbind the `ServerSocket` and terminate active worker threads within a grace period (`awaitTermination`).
+* **Containerized Infrastructure:** Built using the official **Amazon Corretto Java 21** base image (`21-alpine-full`) and published to **Docker Hub**.
+* **Cloud Execution via Docker:** Deployed on AWS EC2 by pulling and running the container image directly.
 
 ---
 
-## 3. Architecture and Maintainability
+## 2. Commit Evidence of Extension Progress
 
-The project evolved from a tightly coupled structure using `if/else` blocks into a clean, extensible architecture.
+As required by the assignment criteria, the framework extension is backed by a specific, meaningful commit demonstrating the concurrency implementation:
 
-### Architecture Diagram
+* **Commit Message:** `Implement concurrent request handling using ThreadPool and graceful shutdown`
+* **Commit Hash:** `<TU_COMMIT_HASH_AQUÍ>` *(Replace with output of `git log -1 --format="%h"`)*
+
+---
+
+## 3. Architecture & Concurrency Model
 
 ```text
-Application (main)
-    │ Registers routes with lambdas and staticfiles()
-    ▼
-WebFramework (Public API Facade)
-    │ Exposes get(), staticfiles(), start(), stop()
-    ▼
-Router ─────────────────────────► Lambda Handlers (/hello, /square, /pi)
-    │ (If route matches)
-    ▼ (If no match - Fallback)
-StaticFileService ──────────────► Resources (index.html, script.js, logo.png)
-    │
-    ▼
-HttpServer (Sequential TCP Socket Loop)
+Incoming Client Requests
+          │
+          ▼
+   HttpServer Loop (Main Thread)
+          │
+          ├──► Delegates Socket Connection to ExecutorService (Thread Pool)
+          │
+          ▼
+   Worker Thread (Thread 1..10)
+          │
+          ├──► Parse Request Abstraction
+          ├──► Check Router (Lambda Handlers)
+          ├──► Fallback to StaticFileService (Byte Streams)
+          └──► Flush Response & Close Client Socket
 ```
 
-### Applied Maintainability Principles
+### Key Differences: Before vs. After Extension
 
-| **Principle**              | **Application in this Project**                                                                                                |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| **Separation of Concerns** | Low-level HTTP infrastructure (sockets) is completely isolated from business logic.                                            |
-| **Low Coupling**           | Adding a new endpoint does not require modifying the server's connection processing loop.                                      |
-| **High Cohesion**          | Each class has a single focused responsibility (`Router` maps routes, `Request` parses data, `StaticFileService` reads bytes). |
-| **Abstraction**            | Developers interact via `get()` and `req.getValue()` without manually managing sockets or I/O streams.                         |
-| **Extensibility**          | Unlimited new endpoints can be added simply by registering functions.                                                          |
+| **Aspect**                    | **Previous Version**                   | **Extended Framework Version**                      |
+| ----------------------------- | -------------------------------------- | --------------------------------------------------- |
+| **Execution Model**           | Sequential (1 request at a time)       | Concurrent (`Executors.newFixedThreadPool(10)`)     |
+| **Shutdown Behavior**         | Closed socket after current iteration  | Closes socket and awaits thread pool termination    |
+| **Packaging & Delivery**      | Executable Fat-JAR transferred via SCP | Docker Image pulled from Docker Hub                 |
+| **Cloud Runtime Environment** | Host OS Java Process                   | Isolated Docker Container on Amazon Corretto 21     |
 
-### Project Structure
+## 4. Local Build & Docker Instructions
 
-```text
-src/
-├── main/
-│   ├── java/
-│   │   └── com/
-│   │       └── escuelaing/
-│   │           └── edu/
-│   │               └── app/
-│   │                   ├── Application.java        # Entry point & route registration
-│   │                   ├── HttpServer.java         # TCP engine & lifecycle (start/stop)
-│   │                   ├── Request.java            # Request abstraction & query parsing
-│   │                   ├── Response.java           # Response abstraction & headers
-│   │                   ├── Route.java              # Functional interface for lambdas
-│   │                   ├── Router.java             # Route lookup registry
-│   │                   ├── StaticFileService.java  # Static resource & byte stream handler
-│   │                   └── WebFramework.java       # Framework public facade API
-│   └── resources/
-│       └── public/
-│           ├── index.html
-│           ├── script.js
-│           ├── image1.png
-│           └── image2.jpg
-```
+### Local Execution (Maven)
 
----
-
-## 4. Local Build and Execution
-
-### Prerequisites
-
-* Java JDK 17 or higher (developed and tested on Java 21).
-* Apache Maven 3.8+.
-
-### Steps
-
-#### 1. Compile and package the application into a runnable Fat-JAR
-
+1. Compile and package the project: 
 ```bash
-mvn clean package
-```
-
-#### 2. Run the application with default settings
-
-The application runs on port `8080` with `APP_ENV=development`.
-
+   mvn clean package
+   ```
+2. Run locally using Java21:
 ```bash
-java -jar target/networking-lab2-1.0-SNAPSHOT.jar
-```
+   java -jar target/networking-lab2-1.0-SNAPSHOT.jar
+   ```
 
-#### 3. Test custom environment variables locally
+### Docker Containerization
 
-Using PowerShell:
-
-```powershell
-$env:PORT="9000"
-$env:GREETING_PREFIX="Hola"
-$env:APP_ENV="development"
-
-java -jar target/networking-lab2-1.0-SNAPSHOT.jar
-```
-
----
-
-## 5. Endpoints & Example Usage
-
-| **Endpoint / Resource** | **Type**  | **Description / Example**    | **Expected Response**                                       |
-| ----------------------- | --------- | ---------------------------- | ----------------------------------------------------------- |
-| `/index.html`           | Static    | `GET /` or `GET /index.html` | HTML5 Web UI served with CSS/JS.                            |
-| `/image1.png`           | Static    | `GET /image1.png`            | Binary image resource served in bytes (`image/png`).        |
-| `/hello`                | Lambda    | `GET /hello?name=Pedro`      | `Hello Pedro!` (or uses `GREETING_PREFIX`).                 |
-| `/pi`                   | Lambda    | `GET /pi`                    | `3.141592653589793`.                                        |
-| `/greeting`             | Lambda    | `GET /greeting?name=Julian`  | `{"greeting":"Hello, Julian!"}`.                            |
-| `/square`               | Lambda    | `GET /square?value=12`       | `{"value":12.0,"square":144.0}`.                            |
-| `/shutdown`             | Lifecycle | `GET /shutdown`              | Gracefully stops the server (development environment only). |
-
----
-
-## 6. Cloud Deployment (AWS EC2)
-
-The application was deployed to a dedicated Amazon EC2 instance.
-
-### Instance Configuration
-
-1. **Instance Type:** Amazon Linux 2023 (`t2.micro`).
-2. **Network Configuration:** Security Group with ports `22` (SSH) and `35000` (Custom TCP) enabled.
-3. **Production Execution:**
-
-   To ensure cloud security, the server was launched with `APP_ENV=production`, which automatically disables the `/shutdown` endpoint.
-
+1. Build Docker Image locally:
 ```bash
-PORT=35000 GREETING_PREFIX="Welcome" APP_ENV=production nohup java -jar app.jar > server.log 2>&1 &
-```
+   docker build -t networking-lab2:latest .
+   ```
+2. Run Docker Container with Environment Variables:
+```bash
+   docker run -d -p 8080:8080 -e PORT=8080 -e GREETING_PREFIX="HolaDocker" -e APP_ENV=development --name webapp networking-lab2:latest
+   ```
+3. Publish Image to Docker Hub:
+```bash
+   docker tag networking-lab2:latest <TU_USUARIO_DOCKERHUB>/networking-lab2:latest
+   ```
+```bash
+   docker push <TU_USUARIO_DOCKERHUB>/networking-lab2:latest   
+   ```
+## 5. AWS EC2 Cloud Deployment
 
-4. **Verification:**
+The containerized framework is live on AWS EC2:
 
-Requesting `/shutdown` on the production AWS URL returns an HTTP `404 Not Found` response, safeguarding the process against unauthorized termination.
+1. **Host Environment:** Amazon Linux 2023 (`t2.micro` instance).
 
-### Cloud URL
+2. **Security Group Rules:** Custom TCP Port `35000` and SSH Port `22` enabled for `0.0.0.0/0`.
 
-```text
-http://44.211.220.229:35000/
-```
+3. **Container Launch Command:**
 
----
+   ```bash
+   sudo docker run -d -p 35000:35000 -e PORT=35000 -e GREETING_PREFIX="WelcomeAWS" -e APP_ENV=production --name webapp <TU_USUARIO_DOCKERHUB>/networking-lab2:latest
+   ```
+4. Endpoint Validation:
 
-## 7. Evidence of Operation
+- Web Interface: http://54.242.64.181:35000/
+- Lambda Endpoint: http://54.242.64.181:35000/hello?name=Julian
+- Protected Shutdown: http://54.242.64.181:35000/shutdown (Returns 404 Not Found under APP_ENV=production).
 
-### 1. Web UI & Static Resources
-![Web Application UI](docs/aws_ui_working.jpeg)
+## 6. Demonstration Video Link
 
-### 2. Lambda Endpoints Responses
-![Lambda Hello Service](docs/aws_hello_lambda.jpeg)
+A short demonstration video showing local Docker execution, Docker Hub publication, and live AWS EC2 deployment is available here:
 
-### 3. Production Protection (/shutdown returns 404)
-![Shutdown Disabled in Production](docs/aws_shutdown_404.jpg)
+- https://youtu.be/HpA7rmRjfqM
 
-## 8. License & Author
+## 7. License & Author
 
-* **Author:** Julián Ramírez
-* **Course:** Enterprise Architecture - Escuela Colombiana de Ingeniería Julio Garavito
+- Author: Julián Ramírez
+- Acknowledgments: Escuela Colombiana de Ingeniería Julio Garavito and the official AWS EC2 / Java OpenJDK documentation.
